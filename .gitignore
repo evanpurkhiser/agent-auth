@@ -1,0 +1,11 @@
+__pycache__/
+*.egg-info/
+*.pkg.tar.zst
+*.pkg.tar.zst.sig
+*.tar.gz
+.coverage
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
+pkg/

@@ -1,0 +1,13 @@
+[Unit]
+Description=SSH agent proxy socket
+
+[Socket]
+ListenStream=/run/ssh-agent-proxy.sock
+SocketMode=0660
+SocketUser=root
+SocketGroup=users
+Accept=yes
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

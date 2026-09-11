@@ -1,0 +1,19 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  publish_aur:
+    name: Publish AUR
+    uses: evanpurkhiser/workflows/.github/workflows/bump-aur.yml@main # zizmor: ignore[unpinned-uses]
+    with:
+      package: agent-auth
+      version: ${{ github.ref_name }}
+    secrets:
+      token: ${{ secrets.AUR_BUMP_DISPATCH_PAT }}
