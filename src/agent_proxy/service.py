@@ -19,7 +19,7 @@ from .protocol import (
     read_packet,
     write_packet,
 )
-from .routing import open_backend
+from .routing import select_backend
 
 LOG = logging.getLogger("ssh-agent-proxy")
 
@@ -41,12 +41,13 @@ def relay_agent_connection(
 
         raise ContextRequiredError("SSH agent access requires ssh-agent-ctx")
 
-    backend = open_backend(context.route, routing_config)
+    backend = select_backend(context.route, routing_config)
+    connection = backend.connect(context)
     response_error: list[Exception] = []
 
     def relay_responses() -> None:
         try:
-            while (packet := read_packet(backend.reader)) is not None:
+            while (packet := read_packet(connection.reader)) is not None:
                 write_packet(client_writer, packet)
         except (EOFError, OSError, ProtocolError) as error:
             response_error.append(error)
@@ -69,21 +70,21 @@ def relay_agent_connection(
 
                 if not notified and is_sign_request(packet):
                     try:
-                        send_notification(context, backend.label)
+                        send_notification(context, backend.name)
                     except (OSError, TimeoutError):
                         LOG.warning("failed to send context notification")
                     notified = True
 
-                write_packet(backend.writer, packet)
+                write_packet(connection.writer, packet)
                 packet = None
         finally:
-            backend.close_input()
+            connection.close_input()
             responses.join(timeout=5)
 
         if response_error:
             raise response_error[0]
     finally:
-        backend.close()
+        connection.close()
 
 
 def run_proxy(routing_config: RoutingConfig | None = None) -> int:

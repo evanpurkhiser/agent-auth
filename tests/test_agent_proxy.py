@@ -14,6 +14,7 @@ SOURCE_PATH = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE_PATH))
 
 from agent_proxy import (  # noqa: E402
+    backends,
     config,
     diagnostics,
     notification,
@@ -95,6 +96,47 @@ agent_witness_socket = "/run/witness.sock"
             config.load_config(Path("/missing/agent-auth.toml"), environment={})
 
 
+class BackendTests(unittest.TestCase):
+    def test_ssh_backend_opens_a_relay_connection(self) -> None:
+        process = mock.Mock()
+        process.stdin = RecordingBytesIO()
+        process.stdout = RecordingBytesIO()
+        routing_config = config.RoutingConfig(
+            ssh_key=Path("/run/keys/relay"), ssh_user="relay"
+        )
+        backend = backends.SshAgentBackend("workstation", "100.64.0.2", routing_config)
+        context = protocol.RequestContext("push-123", "Push changes", ("git", "push"))
+
+        with mock.patch.object(
+            backends.subprocess, "Popen", return_value=process
+        ) as popen:
+            connection = backend.connect(context)
+
+        self.assertEqual(connection.reader, process.stdout)
+        self.assertEqual(connection.writer, process.stdin)
+        self.assertIs(connection.process, process)
+        self.assertEqual(
+            popen.call_args.args[0],
+            [
+                "ssh",
+                "-T",
+                "-i",
+                "/run/keys/relay",
+                "-l",
+                "relay",
+                "-o",
+                "IdentitiesOnly=yes",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+                "-o",
+                "BatchMode=yes",
+                "-o",
+                "ConnectTimeout=5",
+                "100.64.0.2",
+            ],
+        )
+
+
 class ContextProtocolTests(unittest.TestCase):
     def test_context_round_trip(self) -> None:
         context = protocol.RequestContext(
@@ -160,7 +202,7 @@ class ContextProtocolTests(unittest.TestCase):
 class RouteTests(unittest.TestCase):
     def test_ssh_options_are_formatted_from_keywords(self) -> None:
         self.assertEqual(
-            routing.opt(ConnectTimeout=1),
+            backends.opt(ConnectTimeout=1),
             ["-o", "ConnectTimeout=1"],
         )
 
@@ -223,10 +265,13 @@ class RouteTests(unittest.TestCase):
         )
 
         with mock.patch.object(routing.subprocess, "run", side_effect=results):
-            route = routing.find_ready_macbook()
+            backend = routing.find_ready_macbook()
 
         self.assertEqual(
-            route, routing.MacBookRoute("macbook-home.example", "100.64.0.1")
+            backend,
+            backends.SshAgentBackend(
+                "macbook-home", "100.64.0.1", config.RoutingConfig()
+            ),
         )
 
     def test_requested_macbook_filters_candidates_by_hostname(self) -> None:
@@ -254,10 +299,13 @@ class RouteTests(unittest.TestCase):
         )
 
         with mock.patch.object(routing.subprocess, "run", side_effect=results) as run:
-            route = routing.find_ready_macbook("macbook-home")
+            backend = routing.find_ready_macbook("macbook-home")
 
         self.assertEqual(
-            route, routing.MacBookRoute("macbook-home.example", "100.64.0.1")
+            backend,
+            backends.SshAgentBackend(
+                "macbook-home", "100.64.0.1", config.RoutingConfig()
+            ),
         )
         self.assertEqual(run.call_args_list[1].args[0][-1], "100.64.0.1")
 
@@ -285,36 +333,27 @@ class RouteTests(unittest.TestCase):
         routing_config = config.RoutingConfig(computer_pattern=r"workstation\.")
 
         with mock.patch.object(routing.subprocess, "run", side_effect=results) as run:
-            route = routing.find_ready_macbook(config=routing_config)
+            backend = routing.find_ready_macbook(config=routing_config)
 
         self.assertEqual(
-            route, routing.MacBookRoute("workstation.example", "100.64.0.2")
+            backend,
+            backends.SshAgentBackend("workstation", "100.64.0.2", routing_config),
         )
         self.assertEqual(run.call_args_list[1].args[0][-1], "100.64.0.2")
 
     def test_requested_unavailable_route_does_not_fall_back(self) -> None:
         with (
             mock.patch.object(routing, "find_ready_macbook", return_value=None),
-            mock.patch.object(routing, "open_agent_witness") as open_agent_witness,
             self.assertRaisesRegex(RuntimeError, "macbook-away.*unavailable"),
         ):
-            routing.open_backend("macbook-away")
-
-        open_agent_witness.assert_not_called()
+            routing.select_backend("macbook-away")
 
     def test_agent_witness_can_be_selected_directly(self) -> None:
-        backend = mock.sentinel.backend
-        with (
-            mock.patch.object(routing, "find_ready_macbook") as find_ready_macbook,
-            mock.patch.object(
-                routing, "open_agent_witness", return_value=backend
-            ) as open_agent_witness,
-        ):
-            result = routing.open_backend("agent-witness")
+        with mock.patch.object(routing, "find_ready_macbook") as find_ready_macbook:
+            result = routing.select_backend("agent-witness")
 
-        self.assertIs(result, backend)
+        self.assertEqual(result, backends.AgentWitnessBackend(config.RoutingConfig()))
         find_ready_macbook.assert_not_called()
-        open_agent_witness.assert_called_once_with(config.RoutingConfig())
 
 
 class NotificationTests(unittest.TestCase):
@@ -354,15 +393,18 @@ class NotificationTests(unittest.TestCase):
         response = packet(14)
         backend_writer = RecordingBytesIO()
         client_writer = RecordingBytesIO()
-        backend = routing.Backend("agent-witness", io.BytesIO(response), backend_writer)
+        connection = backends.AgentConnection(io.BytesIO(response), backend_writer)
+        backend = mock.Mock()
+        backend.name = "agent-witness"
+        backend.connect.return_value = connection
         context = protocol.RequestContext(
             "push-123", "Push changes", ("git", "push"), "agent-witness"
         )
 
         with (
             mock.patch.object(
-                service, "open_backend", return_value=backend
-            ) as open_backend,
+                service, "select_backend", return_value=backend
+            ) as select_backend,
             mock.patch.object(service, "send_notification") as notify,
         ):
             service.relay_agent_connection(
@@ -372,7 +414,8 @@ class NotificationTests(unittest.TestCase):
                 client_writer,
             )
 
-        open_backend.assert_called_once_with("agent-witness", None)
+        select_backend.assert_called_once_with("agent-witness", None)
+        backend.connect.assert_called_once_with(context)
         notify.assert_called_once_with(context, "agent-witness")
         self.assertEqual(backend_writer.getvalue(), sign_request + sign_request)
         self.assertEqual(
@@ -380,25 +423,21 @@ class NotificationTests(unittest.TestCase):
         )
 
     def test_empty_connection_is_rejected(self) -> None:
-        backend = routing.Backend("agent-witness", io.BytesIO(), RecordingBytesIO())
-
         with (
-            mock.patch.object(
-                service, "open_backend", return_value=backend
-            ) as open_backend,
+            mock.patch.object(service, "select_backend") as select_backend,
             self.assertRaisesRegex(
                 protocol.ProtocolError, "closed before sending an SSH-agent packet"
             ),
         ):
             service.relay_agent_connection(io.BytesIO(), RecordingBytesIO())
 
-        open_backend.assert_not_called()
+        select_backend.assert_not_called()
 
     def test_missing_context_is_rejected_before_routing(self) -> None:
         identity_request = packet(11)
         client_writer = RecordingBytesIO()
         with (
-            mock.patch.object(service, "open_backend") as open_backend,
+            mock.patch.object(service, "select_backend") as select_backend,
             mock.patch.object(service, "warn_context_required") as warn,
             self.assertRaisesRegex(
                 protocol.ContextRequiredError, "requires ssh-agent-ctx"
@@ -409,7 +448,7 @@ class NotificationTests(unittest.TestCase):
             )
 
         self.assertEqual(client_writer.getvalue(), protocol.SSH_AGENT_FAILURE)
-        open_backend.assert_not_called()
+        select_backend.assert_not_called()
         warn.assert_called_once_with(42)
 
     def test_late_context_is_not_forwarded(self) -> None:
@@ -421,12 +460,15 @@ class NotificationTests(unittest.TestCase):
             protocol.RequestContext("ssh-123", "Late context", ("ssh", "offsite"))
         )
         backend_writer = RecordingBytesIO()
-        backend = routing.Backend("agent-witness", io.BytesIO(), backend_writer)
+        connection = backends.AgentConnection(io.BytesIO(), backend_writer)
+        backend = mock.Mock()
+        backend.name = "agent-witness"
+        backend.connect.return_value = connection
 
         with (
             mock.patch.object(
-                service, "open_backend", return_value=backend
-            ) as open_backend,
+                service, "select_backend", return_value=backend
+            ) as select_backend,
             self.assertRaisesRegex(
                 protocol.ProtocolError, "context must be the first packet"
             ),
@@ -440,7 +482,8 @@ class NotificationTests(unittest.TestCase):
                 RecordingBytesIO(),
             )
 
-        open_backend.assert_called_once_with(None, None)
+        select_backend.assert_called_once_with(None, None)
+        backend.connect.assert_called_once_with(initial_context)
         self.assertEqual(backend_writer.getvalue(), identity_request)
 
 
