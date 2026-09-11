@@ -116,13 +116,27 @@ export SSH_AUTH_SOCK=/run/ssh-agent-proxy.sock
 
 For MacBook routing, place the dedicated relay key at
 `/etc/ssh-agent-proxy-key`, readable only by the account that manages backend
-connections. The service supports these environment overrides:
+connections. Routing can be configured in `/etc/agent-auth/config.toml`:
+
+```toml
+[routing]
+computer_pattern = "macbook-.*"
+ssh_key = "/etc/ssh-agent-proxy-key"
+ssh_user = "evan"
+agent_witness_socket = "/run/agent-witness/agent.sock"
+```
+
+Every setting is optional. The values above are the defaults. Set
+`AGENT_AUTH_CONFIG` to load another path. The service also supports environment
+overrides, which take precedence over the TOML file:
 
 - `AGENT_AUTH_SSH_KEY`: relay key path; defaults to
   `/etc/ssh-agent-proxy-key`.
 - `AGENT_AUTH_SSH_USER`: remote SSH user; defaults to `evan`.
 - `AGENT_AUTH_TAILSCALE_MACBOOK_PATTERN`: regular expression used to select
   MacBook peers; defaults to `macbook-.*`.
+- `AGENT_AUTH_AGENT_WITNESS_SOCKET`: fallback Agent Witness socket; defaults to
+  `/run/agent-witness/agent.sock`.
 
 ## Development and releases
 

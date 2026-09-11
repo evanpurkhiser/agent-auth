@@ -5,6 +5,7 @@ import sys
 import threading
 from typing import BinaryIO
 
+from .config import ConfigError, RoutingConfig, load_config
 from .diagnostics import warn_context_required
 from .notification import send_notification
 from .protocol import (
@@ -27,6 +28,7 @@ def relay_agent_connection(
     client_reader: BinaryIO,
     client_writer: BinaryIO,
     client_fd: int | None = None,
+    routing_config: RoutingConfig | None = None,
 ) -> None:
     """Read initial context and relay one SSH-agent connection."""
 
@@ -39,7 +41,7 @@ def relay_agent_connection(
 
         raise ContextRequiredError("SSH agent access requires ssh-agent-ctx")
 
-    backend = open_backend(context.route)
+    backend = open_backend(context.route, routing_config)
     response_error: list[Exception] = []
 
     def relay_responses() -> None:
@@ -84,7 +86,7 @@ def relay_agent_connection(
         backend.close()
 
 
-def run_proxy() -> int:
+def run_proxy(routing_config: RoutingConfig | None = None) -> int:
     """Serve one systemd-accepted SSH-agent connection."""
 
     try:
@@ -92,6 +94,7 @@ def run_proxy() -> int:
             sys.stdin.buffer,
             sys.stdout.buffer,
             sys.stdin.fileno(),
+            routing_config,
         )
     except (EOFError, OSError, ProtocolError, RuntimeError) as error:
         LOG.error("%s", error)
@@ -104,7 +107,13 @@ def main() -> int:
     """Configure service logging and serve the accepted connection."""
 
     logging.basicConfig(level=logging.INFO, format="%(name)s: %(message)s")
-    return run_proxy()
+    try:
+        config = load_config()
+    except (ConfigError, OSError) as error:
+        LOG.error("failed to load configuration: %s", error)
+        return 1
+
+    return run_proxy(config.routing)
 
 
 if __name__ == "__main__":

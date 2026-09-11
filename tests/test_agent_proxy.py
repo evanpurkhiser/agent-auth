@@ -13,14 +13,15 @@ from unittest import mock
 SOURCE_PATH = Path(__file__).parents[1] / "src"
 sys.path.insert(0, str(SOURCE_PATH))
 
-from agent_proxy import context as context_module  # noqa: E402
 from agent_proxy import (  # noqa: E402
+    config,
     diagnostics,
     notification,
     protocol,
     routing,
     service,
 )
+from agent_proxy import context as context_module  # noqa: E402
 
 
 class RecordingBytesIO(io.BytesIO):
@@ -31,6 +32,67 @@ class RecordingBytesIO(io.BytesIO):
 def packet(message_type: int, body: bytes = b"") -> bytes:
     payload = bytes([message_type]) + body
     return len(payload).to_bytes(4, "big") + payload
+
+
+class ConfigTests(unittest.TestCase):
+    def test_missing_default_config_uses_defaults(self) -> None:
+        with mock.patch.object(
+            config, "DEFAULT_CONFIG_PATH", Path("/missing/agent-auth.toml")
+        ):
+            loaded = config.load_config(environment={})
+
+        self.assertEqual(loaded.routing, config.RoutingConfig())
+
+    def test_routing_config_is_loaded_from_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text(
+                """
+[routing]
+computer_pattern = "workstation-.*"
+ssh_key = "/run/keys/relay"
+ssh_user = "relay"
+agent_witness_socket = "/run/witness.sock"
+"""
+            )
+
+            loaded = config.load_config(path, environment={})
+
+        self.assertEqual(loaded.routing.computer_pattern, r"workstation-.*")
+        self.assertEqual(loaded.routing.ssh_key, Path("/run/keys/relay"))
+        self.assertEqual(loaded.routing.ssh_user, "relay")
+        self.assertEqual(loaded.routing.agent_witness_socket, Path("/run/witness.sock"))
+
+    def test_environment_overrides_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text('[routing]\nssh_user = "from-file"\n')
+
+            loaded = config.load_config(
+                path, environment={"AGENT_AUTH_SSH_USER": "from-environment"}
+            )
+
+        self.assertEqual(loaded.routing.ssh_user, "from-environment")
+
+    def test_unknown_setting_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text('[routing]\nssh_host = "example"\n')
+
+            with self.assertRaisesRegex(config.ConfigError, "ssh_host"):
+                config.load_config(path, environment={})
+
+    def test_invalid_computer_pattern_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text('[routing]\ncomputer_pattern = "["\n')
+
+            with self.assertRaisesRegex(config.ConfigError, "computer_pattern"):
+                config.load_config(path, environment={})
+
+    def test_missing_explicit_config_is_rejected(self) -> None:
+        with self.assertRaisesRegex(config.ConfigError, "does not exist"):
+            config.load_config(Path("/missing/agent-auth.toml"), environment={})
 
 
 class ContextProtocolTests(unittest.TestCase):
@@ -199,6 +261,37 @@ class RouteTests(unittest.TestCase):
         )
         self.assertEqual(run.call_args_list[1].args[0][-1], "100.64.0.1")
 
+    def test_configured_computer_pattern_filters_tailnet_peers(self) -> None:
+        status = json.dumps(
+            {
+                "Peer": {
+                    "macbook": {
+                        "DNSName": "macbook-home.example.",
+                        "Online": True,
+                        "TailscaleIPs": ["100.64.0.1"],
+                    },
+                    "workstation": {
+                        "DNSName": "workstation.example.",
+                        "Online": True,
+                        "TailscaleIPs": ["100.64.0.2"],
+                    },
+                }
+            }
+        ).encode()
+        results = (
+            subprocess.CompletedProcess([], 0, stdout=status),
+            subprocess.CompletedProcess([], 0, stdout=b"ready"),
+        )
+        routing_config = config.RoutingConfig(computer_pattern=r"workstation\.")
+
+        with mock.patch.object(routing.subprocess, "run", side_effect=results) as run:
+            route = routing.find_ready_macbook(config=routing_config)
+
+        self.assertEqual(
+            route, routing.MacBookRoute("workstation.example", "100.64.0.2")
+        )
+        self.assertEqual(run.call_args_list[1].args[0][-1], "100.64.0.2")
+
     def test_requested_unavailable_route_does_not_fall_back(self) -> None:
         with (
             mock.patch.object(routing, "find_ready_macbook", return_value=None),
@@ -221,7 +314,7 @@ class RouteTests(unittest.TestCase):
 
         self.assertIs(result, backend)
         find_ready_macbook.assert_not_called()
-        open_agent_witness.assert_called_once_with()
+        open_agent_witness.assert_called_once_with(config.RoutingConfig())
 
 
 class NotificationTests(unittest.TestCase):
@@ -279,7 +372,7 @@ class NotificationTests(unittest.TestCase):
                 client_writer,
             )
 
-        open_backend.assert_called_once_with("agent-witness")
+        open_backend.assert_called_once_with("agent-witness", None)
         notify.assert_called_once_with(context, "agent-witness")
         self.assertEqual(backend_writer.getvalue(), sign_request + sign_request)
         self.assertEqual(
@@ -347,7 +440,7 @@ class NotificationTests(unittest.TestCase):
                 RecordingBytesIO(),
             )
 
-        open_backend.assert_called_once_with(None)
+        open_backend.assert_called_once_with(None, None)
         self.assertEqual(backend_writer.getvalue(), identity_request)
 
 

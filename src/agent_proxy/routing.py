@@ -4,18 +4,14 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 import re
 import socket
 import subprocess
 from dataclasses import dataclass
-from pathlib import Path
 from typing import BinaryIO
 
-AGENT_WITNESS_SOCKET = Path("/run/agent-witness/agent.sock")
-MACBOOK_PATTERN = os.environ.get("AGENT_AUTH_TAILSCALE_MACBOOK_PATTERN", r"macbook-.*")
-SSH_KEY = os.environ.get("AGENT_AUTH_SSH_KEY", "/etc/ssh-agent-proxy-key")
-SSH_USER = os.environ.get("AGENT_AUTH_SSH_USER", "evan")
+from .config import DEFAULT_ROUTING_CONFIG, RoutingConfig
+
 # The remote forced command handles this as a readiness probe instead of
 # forwarding the connection to its SSH agent.
 STATUS_REQUEST = b"AGENT-PROXY-STATUS/1\n"
@@ -79,7 +75,7 @@ class Backend:
 
 
 def parse_macbook_routes(
-    status: object, pattern: str = MACBOOK_PATTERN
+    status: object, pattern: str = DEFAULT_ROUTING_CONFIG.computer_pattern
 ) -> list[MacBookRoute]:
     """Extract matching online MacBooks in most-recently-active order."""
 
@@ -122,23 +118,30 @@ def opt(**options: str | int) -> list[str]:
     ]
 
 
-def ssh_options() -> list[str]:
+def ssh_options(config: RoutingConfig | None = None) -> list[str]:
     """Build SSH arguments shared by readiness and relay connections."""
+
+    config = config or RoutingConfig()
 
     return [
         "-T",
         "-i",
-        SSH_KEY,
+        str(config.ssh_key),
         "-l",
-        SSH_USER,
+        config.ssh_user,
         *opt(IdentitiesOnly="yes"),
         *opt(StrictHostKeyChecking="accept-new"),
         *opt(BatchMode="yes"),
     ]
 
 
-def find_ready_macbook(hostname: str | None = None) -> MacBookRoute | None:
+def find_ready_macbook(
+    hostname: str | None = None,
+    config: RoutingConfig | None = None,
+) -> MacBookRoute | None:
     """Return the requested or most recently active ready MacBook."""
+
+    config = config or RoutingConfig()
 
     try:
         result = subprocess.run(
@@ -148,7 +151,9 @@ def find_ready_macbook(hostname: str | None = None) -> MacBookRoute | None:
             stderr=subprocess.DEVNULL,
             timeout=3,
         )
-        routes = parse_macbook_routes(json.loads(result.stdout))
+        routes = parse_macbook_routes(
+            json.loads(result.stdout), config.computer_pattern
+        )
     except (OSError, re.error, subprocess.SubprocessError, json.JSONDecodeError):
         return None
 
@@ -161,7 +166,7 @@ def find_ready_macbook(hostname: str | None = None) -> MacBookRoute | None:
             probe = subprocess.run(
                 [
                     "ssh",
-                    *ssh_options(),
+                    *ssh_options(config),
                     *opt(ConnectTimeout=1),
                     *opt(ConnectionAttempts=1),
                     route.address,
@@ -180,14 +185,16 @@ def find_ready_macbook(hostname: str | None = None) -> MacBookRoute | None:
     return None
 
 
-def open_agent_witness() -> Backend:
+def open_agent_witness(config: RoutingConfig | None = None) -> Backend:
     """Open the local agent-witness backend."""
 
-    if not AGENT_WITNESS_SOCKET.is_socket():
+    config = config or RoutingConfig()
+
+    if not config.agent_witness_socket.is_socket():
         raise RuntimeError("agent-witness socket is unavailable")
 
     agent_socket = socket.socket(socket.AF_UNIX)
-    agent_socket.connect(str(AGENT_WITNESS_SOCKET))
+    agent_socket.connect(str(config.agent_witness_socket))
     return Backend(
         "agent-witness",
         agent_socket.makefile("rb", buffering=0),
@@ -196,24 +203,29 @@ def open_agent_witness() -> Backend:
     )
 
 
-def open_backend(requested_route: str | None = None) -> Backend:
+def open_backend(
+    requested_route: str | None = None,
+    config: RoutingConfig | None = None,
+) -> Backend:
     """Open the requested route or automatically select a ready backend."""
+
+    config = config or RoutingConfig()
 
     if requested_route == "agent-witness":
         LOG.info("using agent-witness")
-        return open_agent_witness()
+        return open_agent_witness(config)
 
-    route = find_ready_macbook(requested_route)
+    route = find_ready_macbook(requested_route, config)
     if route is None:
         if requested_route is not None:
             raise RuntimeError(f"requested route {requested_route!r} is unavailable")
 
         LOG.info("no MacBook is ready, using agent-witness")
-        return open_agent_witness()
+        return open_agent_witness(config)
 
     LOG.info("using %s", route.name)
     process = subprocess.Popen(
-        ["ssh", *ssh_options(), *opt(ConnectTimeout=5), route.address],
+        ["ssh", *ssh_options(config), *opt(ConnectTimeout=5), route.address],
         stdin=subprocess.PIPE,
         stdout=subprocess.PIPE,
     )
