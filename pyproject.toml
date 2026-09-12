@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.12"
 license = "MIT"
 authors = [
-  { name = "Evan Purkhiser", email = "evanpurkhiser@gmail.com" },
+  { name = "Evan Purkhiser", email = "agent-auth.py@evanpurkhiser.com" },
 ]
 keywords = ["ssh-agent", "systemd", "tailscale"]
 classifiers = [
