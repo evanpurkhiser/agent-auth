@@ -1,5 +1,6 @@
 [Unit]
 Description=SSH agent proxy connection
+CollectMode=inactive-or-failed
 Wants=container-agent-witness.service
 After=container-agent-witness.service
 
