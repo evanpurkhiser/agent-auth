@@ -1,6 +1,7 @@
 name: Release
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*"
@@ -9,8 +10,28 @@ permissions:
   contents: read
 
 jobs:
+  validate_version:
+    name: Validate package version
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Match package version to tag
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION=$(python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')
+          if [[ "$TAG" != "v${VERSION}" ]]; then
+            echo "Tag ${TAG} does not match package version ${VERSION}"
+            exit 1
+          fi
+
   publish_aur:
     name: Publish AUR
+    needs: validate_version
     uses: evanpurkhiser/workflows/.github/workflows/bump-aur.yml@main # zizmor: ignore[unpinned-uses]
     with:
       package: agent-auth

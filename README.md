@@ -151,7 +151,9 @@ The runtime uses only the Python standard library. Tests cover protocol bounds,
 routing, notification behavior, connection relaying, peer diagnostics, and the
 command wrapper.
 
-Pushing a version tag dispatches the `agent-auth` build in the
+Run the `Bump` workflow with the next semantic version to release. It waits for
+CI on `main`, updates `pyproject.toml`, creates the release commit and tag, and
+dispatches the `agent-auth` build in the
 [`PKGBUILDs`](https://github.com/evanpurkhiser/PKGBUILDs) repository. That
 repository owns the Arch package recipe, package signing, and pacman repository
 publication.
