@@ -33,11 +33,13 @@ ssh-agent-ctx "Push the agent-auth release" -- git push origin main
 The notification emitted for the signing request can then explain what is
 happening:
 
-```text
-🔐 Agent key request (remote-agent-host via agent-witness)
-Reason: Push the agent-auth release
-Command: git push origin main
+🔐 Push the agent-auth release
+
+```command
+git push origin main
 ```
+
+(agent-auth from `remote-agent-host` via `agent-witness`)
 
 > [!NOTE]
 > Agent Witness does not yet receive this context or display it alongside its

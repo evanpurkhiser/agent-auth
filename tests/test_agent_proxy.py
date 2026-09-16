@@ -377,15 +377,28 @@ class NotificationTests(unittest.TestCase):
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data)
         self.assertEqual(request.full_url, "https://bot.prk.network/")
+        self.assertEqual(payload["parse_mode"], "MarkdownV2")
         self.assertEqual(
             payload["text"],
-            "\n".join(
+            "\n\n".join(
                 (
-                    "🔐 Agent key request (server via macbook-home)",
-                    "Reason: Update the remote branch",
-                    "Command: git push origin main",
+                    "🔐 Update the remote branch",
+                    "```command\ngit push origin main\n```",
+                    r"\(agent\-auth from `server` via `macbook-home`\)",
                 )
             ),
+        )
+
+    def test_markdown_escapes_reserved_characters(self) -> None:
+        self.assertEqual(
+            notification.escape_markdown(r"\_*[]()~`>#+-=|{}.!"),
+            r"\\\_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!",
+        )
+
+    def test_code_escapes_backticks_and_backslashes(self) -> None:
+        self.assertEqual(
+            notification.escape_markdown("echo `pwd` \\\n--flag='[x]'", code=True),
+            "echo \\`pwd\\` \\\\\n--flag='[x]'",
         )
 
     def test_connection_notifies_once_when_signing(self) -> None:
