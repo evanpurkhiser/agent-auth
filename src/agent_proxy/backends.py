@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import socket
 import subprocess
+from contextlib import ExitStack
 from dataclasses import dataclass
 from typing import BinaryIO, Protocol
 
 from .config import RoutingConfig
-from .protocol import RequestContext
+from .protocol import SSH_AGENT_SUCCESS, ProtocolError, RequestContext, read_packet
 
 # The remote forced command handles this as a readiness probe instead of
 # forwarding the connection to its SSH agent.
@@ -160,16 +161,40 @@ class AgentWitnessBackend:
         return self.config.agent_witness_socket.is_socket()
 
     def connect(self, context: RequestContext) -> AgentConnection:
-        # Agent Witness does not yet accept the context extension.
-        del context
-
         if not self.is_ready():
             raise RuntimeError("agent-witness socket is unavailable")
 
-        agent_socket = socket.socket(socket.AF_UNIX)
-        agent_socket.connect(str(self.config.agent_witness_socket))
-        return AgentConnection(
-            agent_socket.makefile("rb", buffering=0),
-            agent_socket.makefile("wb", buffering=0),
-            sock=agent_socket,
-        )
+        try:
+            packet = subprocess.run(
+                [
+                    "agent-witness",
+                    "write-context",
+                    f"--reason={context.reason}",
+                    f"--groupId={context.group_id}",
+                    "--",
+                    *context.command,
+                ],
+                stdout=subprocess.PIPE,
+                check=True,
+                timeout=5,
+            ).stdout
+        except subprocess.SubprocessError as error:
+            raise RuntimeError(
+                "agent-witness failed to write request context"
+            ) from error
+
+        with ExitStack() as resources:
+            agent_socket = resources.enter_context(socket.socket(socket.AF_UNIX))
+            agent_socket.settimeout(5)
+            agent_socket.connect(str(self.config.agent_witness_socket))
+            reader = resources.enter_context(agent_socket.makefile("rb", buffering=0))
+            writer = resources.enter_context(agent_socket.makefile("wb", buffering=0))
+            agent_socket.sendall(packet)
+
+            if read_packet(reader) != SSH_AGENT_SUCCESS:
+                raise ProtocolError("agent-witness rejected request context")
+
+            agent_socket.settimeout(None)
+            connection = AgentConnection(reader, writer, sock=agent_socket)
+            resources.pop_all()
+            return connection

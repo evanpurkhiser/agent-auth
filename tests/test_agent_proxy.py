@@ -97,6 +97,146 @@ agent_witness_socket = "/run/witness.sock"
 
 
 class BackendTests(unittest.TestCase):
+    def test_witness_sends_context_before_relaying_on_the_same_connection(self) -> None:
+        context = protocol.RequestContext(
+            "d371fa50-458a-4191-8893-d00139c781a2",
+            "-Push the release",
+            ("git", "push", "--all", "release candidate", ""),
+            "agent-witness",
+        )
+        context_packet = packet(27, b"generated witness context")
+        request = packet(protocol.SSH_AGENTC_SIGN_REQUEST)
+        response = packet(14, b"signature")
+        errors: list[Exception] = []
+        client_writer = io.BytesIO()
+
+        with tempfile.TemporaryDirectory() as directory:
+            socket_path = Path(directory, "witness.sock")
+            backend = backends.AgentWitnessBackend(
+                config.RoutingConfig(agent_witness_socket=socket_path)
+            )
+            with socket.socket(socket.AF_UNIX) as listener:
+                listener.bind(str(socket_path))
+                listener.listen()
+                listener.settimeout(2)
+
+                def serve_witness() -> None:
+                    try:
+                        connection, _ = listener.accept()
+                        with (
+                            connection,
+                            connection.makefile("rb", buffering=0) as reader,
+                        ):
+                            connection.settimeout(2)
+                            self.assertEqual(
+                                protocol.read_packet(reader), context_packet
+                            )
+                            # No agent request may arrive until context is accepted.
+                            connection.setblocking(False)
+                            with self.assertRaises(BlockingIOError):
+                                connection.recv(1)
+                            connection.settimeout(2)
+                            for byte in protocol.SSH_AGENT_SUCCESS:
+                                connection.sendall(bytes([byte]))
+                            self.assertEqual(protocol.read_packet(reader), request)
+                            connection.sendall(response)
+                            self.assertIsNone(protocol.read_packet(reader))
+                    except Exception as error:
+                        errors.append(error)
+
+                server = threading.Thread(target=serve_witness, daemon=True)
+                server.start()
+                with (
+                    mock.patch.object(
+                        backends.subprocess,
+                        "run",
+                        return_value=subprocess.CompletedProcess([], 0, context_packet),
+                    ) as run,
+                    mock.patch.object(service, "select_backend", return_value=backend),
+                    mock.patch.object(service, "send_notification"),
+                ):
+                    service.relay_agent_connection(
+                        io.BytesIO(protocol.encode_context(context) + request),
+                        client_writer,
+                    )
+                server.join(timeout=3)
+
+        self.assertFalse(server.is_alive())
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            client_writer.getvalue(), protocol.SSH_AGENT_SUCCESS + response
+        )
+        run.assert_called_once_with(
+            [
+                "agent-witness",
+                "write-context",
+                f"--reason={context.reason}",
+                f"--groupId={context.group_id}",
+                "--",
+                *context.command,
+            ],
+            stdout=subprocess.PIPE,
+            check=True,
+            timeout=5,
+        )
+
+    def test_witness_closes_connection_when_context_is_not_acknowledged(self) -> None:
+        context = protocol.RequestContext("group", "Push", ("git", "push"))
+        for response in (
+            protocol.SSH_AGENT_FAILURE,
+            packet(28),
+            packet(12),
+            b"",
+            b"\x00\x00",
+            b"\x00\x00\x00\x00",
+        ):
+            with self.subTest(response=response):
+                reader = io.BytesIO(response)
+                writer = io.BytesIO()
+                agent_socket = mock.MagicMock()
+                agent_socket.__enter__.return_value = agent_socket
+                agent_socket.makefile.side_effect = [reader, writer]
+                backend = backends.AgentWitnessBackend(config.RoutingConfig())
+
+                with (
+                    mock.patch.object(
+                        backends.AgentWitnessBackend, "is_ready", return_value=True
+                    ),
+                    mock.patch.object(backends.subprocess, "run") as run,
+                    mock.patch.object(
+                        backends.socket, "socket", return_value=agent_socket
+                    ),
+                    self.assertRaises((protocol.ProtocolError, EOFError)),
+                ):
+                    run.return_value.stdout = b"context packet"
+                    backend.connect(context)
+
+                self.assertTrue(reader.closed)
+                self.assertTrue(writer.closed)
+                agent_socket.__exit__.assert_called_once()
+                agent_socket.sendall.assert_called_once_with(b"context packet")
+
+    def test_witness_packet_generation_failure_does_not_open_a_socket(self) -> None:
+        context = protocol.RequestContext("invalid-uuid", "Push", ("git", "push"))
+        backend = backends.AgentWitnessBackend(config.RoutingConfig())
+        for error in (
+            subprocess.CalledProcessError(2, "agent-witness"),
+            subprocess.TimeoutExpired("agent-witness", 5),
+            FileNotFoundError("agent-witness"),
+        ):
+            with (
+                self.subTest(error=error),
+                mock.patch.object(
+                    backends.AgentWitnessBackend, "is_ready", return_value=True
+                ),
+                mock.patch.object(backends.subprocess, "run", side_effect=error),
+                mock.patch.object(backends.socket, "socket") as create_socket,
+                self.assertRaises((RuntimeError, OSError)),
+            ):
+                backend.connect(context)
+
+            create_socket.assert_not_called()
+
     def test_ssh_backend_opens_a_relay_connection(self) -> None:
         process = mock.Mock()
         process.stdin = RecordingBytesIO()

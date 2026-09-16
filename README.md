@@ -41,10 +41,11 @@ git push origin main
 
 (agent-auth from `remote-agent-host` via `agent-witness`)
 
-> [!NOTE]
-> Agent Witness does not yet receive this context or display it alongside its
-> approval request. Support for passing the context through to Agent Witness is
-> planned.
+The Agent Witness backend uses `agent-witness write-context` to generate a
+packet from the caller's reason, group UUID, and command arguments. It sends
+the packet first, consumes the acknowledgement, and relays signing requests
+over the same connection. Caller-provided `--group-id` values must be UUIDs
+when using Agent Witness; the default is a generated UUID.
 
 Direct connections to the proxy are rejected unless they begin with this
 context. The proxy sends a notification when the wrapped command first asks for
@@ -98,6 +99,8 @@ ssh-agent-ctx --route=agent-witness "Push the release" -- git push
 
 - Linux with systemd socket activation and Python 3.12 or newer.
 - At least one signing backend: Agent Witness, or a MacBook with an SSH agent.
+- For Agent Witness, an `agent-witness` executable supporting `write-context`
+  on the proxy service's `PATH`.
 - Tailscale connectivity between the proxy host and MacBook when using MacBook
   routing. A local Agent Witness backend does not require Tailscale.
 - Backend credentials and sockets isolated from untrusted workload accounts
