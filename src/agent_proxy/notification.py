@@ -7,7 +7,7 @@ import urllib.request
 
 from .protocol import RequestContext
 
-NOTIFICATION_ENDPOINT = "https://bot.prk.network/"
+NOTIFICATION_ENDPOINT = "https://bot.prk.network/?channel=agent-auth"
 
 
 def escape_markdown(text: str, *, code: bool = False) -> str:

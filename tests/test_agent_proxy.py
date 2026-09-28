@@ -376,7 +376,9 @@ class NotificationTests(unittest.TestCase):
 
         request = urlopen.call_args.args[0]
         payload = json.loads(request.data)
-        self.assertEqual(request.full_url, "https://bot.prk.network/")
+        self.assertEqual(
+            request.full_url, "https://bot.prk.network/?channel=agent-auth"
+        )
         self.assertEqual(payload["parse_mode"], "MarkdownV2")
         self.assertEqual(
             payload["text"],
