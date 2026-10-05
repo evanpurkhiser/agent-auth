@@ -43,6 +43,7 @@ class ConfigTests(unittest.TestCase):
             loaded = config.load_config(environment={})
 
         self.assertEqual(loaded.routing, config.RoutingConfig())
+        self.assertEqual(loaded.notification, config.NotificationConfig())
 
     def test_routing_config_is_loaded_from_toml(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -74,6 +75,33 @@ agent_witness_socket = "/run/witness.sock"
             )
 
         self.assertEqual(loaded.routing.ssh_user, "from-environment")
+
+    def test_notification_config_is_loaded_from_toml(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text(
+                """
+[notification]
+command = ["/usr/local/bin/notify", "--channel", "signing"]
+timeout = 1.5
+"""
+            )
+
+            loaded = config.load_config(path, environment={})
+
+        self.assertEqual(
+            loaded.notification.command,
+            ("/usr/local/bin/notify", "--channel", "signing"),
+        )
+        self.assertEqual(loaded.notification.timeout, 1.5)
+
+    def test_invalid_notification_command_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory, "config.toml")
+            path.write_text("[notification]\ncommand = []\n")
+
+            with self.assertRaisesRegex(config.ConfigError, "notification.command"):
+                config.load_config(path, environment={})
 
     def test_unknown_setting_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -497,51 +525,47 @@ class RouteTests(unittest.TestCase):
 
 
 class NotificationTests(unittest.TestCase):
-    def test_notification_contains_reason_command_and_route(self) -> None:
+    def test_notification_command_receives_signing_event(self) -> None:
         context = protocol.RequestContext(
             "push-123", "Update the remote branch", ("git", "push", "origin", "main")
         )
-        response = mock.MagicMock()
-        response.__enter__.return_value = response
+        notification_config = config.NotificationConfig(
+            command=("/usr/local/bin/notify", "--signing"), timeout=1.5
+        )
 
         with (
             mock.patch.object(
                 notification.socket, "gethostname", return_value="server"
             ),
-            mock.patch.object(
-                notification.urllib.request, "urlopen", return_value=response
-            ) as urlopen,
+            mock.patch.object(notification.subprocess, "run") as run,
         ):
-            notification.send_notification(context, "macbook-home")
+            notification.send_notification(context, "macbook-home", notification_config)
 
-        request = urlopen.call_args.args[0]
-        payload = json.loads(request.data)
+        self.assertEqual(run.call_args.args[0], notification_config.command)
         self.assertEqual(
-            request.full_url, "https://bot.prk.network/?channel=agent-auth"
+            json.loads(run.call_args.kwargs["input"]),
+            {
+                "version": 1,
+                "reason": "Update the remote branch",
+                "command": ["git", "push", "origin", "main"],
+                "group_id": "push-123",
+                "route": "macbook-home",
+                "hostname": "server",
+            },
         )
-        self.assertEqual(payload["parse_mode"], "MarkdownV2")
-        self.assertEqual(
-            payload["text"],
-            "\n\n".join(
-                (
-                    "🔐 Update the remote branch",
-                    "```command\ngit push origin main\n```",
-                    r"\(agent\-auth from `server` via `macbook-home`\)",
-                )
-            ),
-        )
+        self.assertEqual(run.call_args.kwargs["stdout"], subprocess.DEVNULL)
+        self.assertTrue(run.call_args.kwargs["check"])
+        self.assertEqual(run.call_args.kwargs["timeout"], 1.5)
 
-    def test_markdown_escapes_reserved_characters(self) -> None:
-        self.assertEqual(
-            notification.escape_markdown(r"\_*[]()~`>#+-=|{}.!"),
-            r"\\\_\*\[\]\(\)\~\`\>\#\+\-\=\|\{\}\.\!",
-        )
+    def test_notification_is_disabled_without_a_command(self) -> None:
+        with mock.patch.object(notification.subprocess, "run") as run:
+            notification.send_notification(
+                protocol.RequestContext("push-123", "Push changes", ("git", "push")),
+                "agent-witness",
+                config.NotificationConfig(),
+            )
 
-    def test_code_escapes_backticks_and_backslashes(self) -> None:
-        self.assertEqual(
-            notification.escape_markdown("echo `pwd` \\\n--flag='[x]'", code=True),
-            "echo \\`pwd\\` \\\\\n--flag='[x]'",
-        )
+        run.assert_not_called()
 
     def test_connection_notifies_once_when_signing(self) -> None:
         sign_request = packet(protocol.SSH_AGENTC_SIGN_REQUEST)
@@ -567,11 +591,16 @@ class NotificationTests(unittest.TestCase):
                     protocol.encode_context(context) + sign_request + sign_request
                 ),
                 client_writer,
+                notification_config=config.NotificationConfig(command=("notify",)),
             )
 
         select_backend.assert_called_once_with("agent-witness", None)
         backend.connect.assert_called_once_with(context)
-        notify.assert_called_once_with(context, "agent-witness")
+        notify.assert_called_once_with(
+            context,
+            "agent-witness",
+            config.NotificationConfig(command=("notify",)),
+        )
         self.assertEqual(backend_writer.getvalue(), sign_request + sign_request)
         self.assertEqual(
             client_writer.getvalue(), protocol.SSH_AGENT_SUCCESS + response

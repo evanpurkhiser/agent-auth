@@ -1,11 +1,12 @@
 """Consume connection context, notify on signing, and relay agent packets."""
 
 import logging
+import subprocess
 import sys
 import threading
 from typing import BinaryIO
 
-from .config import ConfigError, RoutingConfig, load_config
+from .config import ConfigError, NotificationConfig, RoutingConfig, load_config
 from .diagnostics import warn_context_required
 from .notification import send_notification
 from .protocol import (
@@ -29,6 +30,7 @@ def relay_agent_connection(
     client_writer: BinaryIO,
     client_fd: int | None = None,
     routing_config: RoutingConfig | None = None,
+    notification_config: NotificationConfig | None = None,
 ) -> None:
     """Read initial context and relay one SSH-agent connection."""
 
@@ -42,6 +44,7 @@ def relay_agent_connection(
         raise ContextRequiredError("SSH agent access requires ssh-agent-ctx")
 
     backend = select_backend(context.route, routing_config)
+    notification_config = notification_config or NotificationConfig()
     connection = backend.connect(context)
     response_error: list[Exception] = []
 
@@ -70,9 +73,9 @@ def relay_agent_connection(
 
                 if not notified and is_sign_request(packet):
                     try:
-                        send_notification(context, backend.name)
-                    except (OSError, TimeoutError):
-                        LOG.warning("failed to send context notification")
+                        send_notification(context, backend.name, notification_config)
+                    except (OSError, subprocess.SubprocessError) as error:
+                        LOG.warning("failed to send context notification: %s", error)
                     notified = True
 
                 write_packet(connection.writer, packet)
@@ -87,7 +90,10 @@ def relay_agent_connection(
         connection.close()
 
 
-def run_proxy(routing_config: RoutingConfig | None = None) -> int:
+def run_proxy(
+    routing_config: RoutingConfig | None = None,
+    notification_config: NotificationConfig | None = None,
+) -> int:
     """Serve one systemd-accepted SSH-agent connection."""
 
     try:
@@ -96,6 +102,7 @@ def run_proxy(routing_config: RoutingConfig | None = None) -> int:
             sys.stdout.buffer,
             sys.stdin.fileno(),
             routing_config,
+            notification_config,
         )
     except (EOFError, OSError, ProtocolError, RuntimeError) as error:
         LOG.error("%s", error)
@@ -114,7 +121,7 @@ def main() -> int:
         LOG.error("failed to load configuration: %s", error)
         return 1
 
-    return run_proxy(config.routing)
+    return run_proxy(config.routing, config.notification)
 
 
 if __name__ == "__main__":

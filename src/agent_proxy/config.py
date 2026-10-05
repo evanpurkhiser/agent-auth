@@ -30,17 +30,29 @@ DEFAULT_ROUTING_CONFIG = RoutingConfig()
 
 
 @dataclass(frozen=True, slots=True)
+class NotificationConfig:
+    """Settings for delivering signing-request notifications."""
+
+    command: tuple[str, ...] | None = None
+    timeout: float = 3
+
+
+DEFAULT_NOTIFICATION_CONFIG = NotificationConfig()
+
+
+@dataclass(frozen=True, slots=True)
 class Config:
     """Top-level agent-auth configuration."""
 
     routing: RoutingConfig = DEFAULT_ROUTING_CONFIG
+    notification: NotificationConfig = DEFAULT_NOTIFICATION_CONFIG
 
 
-def _routing_values(document: object) -> dict[str, str]:
+def _config_values(document: object) -> tuple[dict[str, str], dict[str, object]]:
     if not isinstance(document, dict):
         raise ConfigError("configuration must be a TOML table")
 
-    unknown_sections = document.keys() - {"routing"}
+    unknown_sections = document.keys() - {"routing", "notification"}
     if unknown_sections:
         names = ", ".join(sorted(unknown_sections))
         raise ConfigError(f"unknown configuration section: {names}")
@@ -64,14 +76,39 @@ def _routing_values(document: object) -> dict[str, str]:
         if not isinstance(value, str) or not value:
             raise ConfigError(f"routing.{name} must be a non-empty string")
 
-    return routing
+    notification = document.get("notification", {})
+    if not isinstance(notification, dict):
+        raise ConfigError("notification must be a TOML table")
+
+    unknown_fields = notification.keys() - {"command", "timeout"}
+    if unknown_fields:
+        names = ", ".join(sorted(unknown_fields))
+        raise ConfigError(f"unknown notification setting: {names}")
+
+    command = notification.get("command")
+    if command is not None and (
+        not isinstance(command, list)
+        or not command
+        or any(not isinstance(argument, str) or not argument for argument in command)
+    ):
+        raise ConfigError("notification.command must be a non-empty string array")
+
+    timeout = notification.get("timeout")
+    if timeout is not None and (
+        isinstance(timeout, bool)
+        or not isinstance(timeout, (int, float))
+        or timeout <= 0
+    ):
+        raise ConfigError("notification.timeout must be a positive number")
+
+    return routing, notification
 
 
 def load_config(
     path: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> Config:
-    """Load routing settings, allowing environment variables to override TOML."""
+    """Load service settings, allowing environment variables to override TOML."""
 
     environ = os.environ if environment is None else environment
     config_path = path
@@ -81,29 +118,32 @@ def load_config(
 
     try:
         with config_path.open("rb") as config_file:
-            values = _routing_values(tomllib.load(config_file))
+            routing_values, notification_values = _config_values(
+                tomllib.load(config_file)
+            )
     except FileNotFoundError:
         if not optional:
             raise ConfigError(f"configuration file does not exist: {config_path}")
-        values = {}
+        routing_values = {}
+        notification_values = {}
     except tomllib.TOMLDecodeError as error:
         raise ConfigError(f"invalid TOML in {config_path}: {error}") from error
 
     computer_pattern = environ.get(
         "AGENT_AUTH_TAILSCALE_MACBOOK_PATTERN",
-        values.get("computer_pattern", DEFAULT_ROUTING_CONFIG.computer_pattern),
+        routing_values.get("computer_pattern", DEFAULT_ROUTING_CONFIG.computer_pattern),
     )
     ssh_key = environ.get(
         "AGENT_AUTH_SSH_KEY",
-        values.get("ssh_key", str(DEFAULT_ROUTING_CONFIG.ssh_key)),
+        routing_values.get("ssh_key", str(DEFAULT_ROUTING_CONFIG.ssh_key)),
     )
     ssh_user = environ.get(
         "AGENT_AUTH_SSH_USER",
-        values.get("ssh_user", DEFAULT_ROUTING_CONFIG.ssh_user),
+        routing_values.get("ssh_user", DEFAULT_ROUTING_CONFIG.ssh_user),
     )
     agent_witness_socket = environ.get(
         "AGENT_AUTH_AGENT_WITNESS_SOCKET",
-        values.get(
+        routing_values.get(
             "agent_witness_socket", str(DEFAULT_ROUTING_CONFIG.agent_witness_socket)
         ),
     )
@@ -113,11 +153,19 @@ def load_config(
     except re.error as error:
         raise ConfigError(f"routing.computer_pattern is invalid: {error}") from error
 
+    command = notification_values.get("command")
+
     return Config(
         routing=RoutingConfig(
             computer_pattern=computer_pattern,
             ssh_key=Path(ssh_key),
             ssh_user=ssh_user,
             agent_witness_socket=Path(agent_witness_socket),
-        )
+        ),
+        notification=NotificationConfig(
+            command=tuple(command) if isinstance(command, list) else None,
+            timeout=float(
+                notification_values.get("timeout", DEFAULT_NOTIFICATION_CONFIG.timeout)
+            ),
+        ),
     )

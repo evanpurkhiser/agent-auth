@@ -1,37 +1,33 @@
-"""Format signing context and deliver it through the local Telegram service."""
+"""Deliver signing context to a configured notification command."""
 
 import json
-import shlex
 import socket
-import urllib.request
+import subprocess
 
+from .config import NotificationConfig
 from .protocol import RequestContext
 
-NOTIFICATION_ENDPOINT = "https://bot.prk.network/?channel=agent-auth"
 
+def send_notification(
+    context: RequestContext, route: str, config: NotificationConfig
+) -> None:
+    """Pass a signing event to the configured command as JSON on standard input."""
 
-def escape_markdown(text: str, *, code: bool = False) -> str:
-    """Escape Telegram MarkdownV2 text or the contents of a code entity."""
-    special = "\\`" if code else "\\_*[]()~`>#+-=|{}.!"
-    return "".join(f"\\{char}" if char in special else char for char in text)
+    if config.command is None:
+        return
 
-
-def send_notification(context: RequestContext, route: str) -> None:
-    hostname = escape_markdown(socket.gethostname(), code=True)
-    route = escape_markdown(route, code=True)
-    command = escape_markdown(shlex.join(context.command), code=True)
-    message = "\n\n".join(
-        (
-            f"🔐 {escape_markdown(context.reason)}",
-            f"```command\n{command}\n```",
-            rf"\(agent\-auth from `{hostname}` via `{route}`\)",
-        )
+    event = {
+        "version": 1,
+        "reason": context.reason,
+        "command": list(context.command),
+        "group_id": context.group_id,
+        "route": route,
+        "hostname": socket.gethostname(),
+    }
+    subprocess.run(
+        config.command,
+        input=json.dumps(event).encode(),
+        stdout=subprocess.DEVNULL,
+        check=True,
+        timeout=config.timeout,
     )
-    request = urllib.request.Request(
-        NOTIFICATION_ENDPOINT,
-        data=json.dumps({"text": message, "parse_mode": "MarkdownV2"}).encode(),
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    with urllib.request.urlopen(request, timeout=3):
-        pass

@@ -30,8 +30,8 @@ For example:
 ssh-agent-ctx "Push the agent-auth release" -- git push origin main
 ```
 
-The notification emitted for the signing request can then explain what is
-happening:
+An optional notification command receives the signing context and can explain
+what is happening:
 
 🔐 Push the agent-auth release
 
@@ -48,8 +48,9 @@ over the same connection. Caller-provided `--group-id` values must be UUIDs
 when using Agent Witness; the default is a generated UUID.
 
 Direct connections to the proxy are rejected unless they begin with this
-context. The proxy sends a notification when the wrapped command first asks for
-a signature; operations such as listing public keys do not notify.
+context. When configured, the proxy runs the notification command when the
+wrapped command first asks for a signature; operations such as listing public
+keys do not notify.
 
 The same mechanism can cover privilege escalation when the remote host uses
 `pam_ssh_agent_auth` for sudo authentication:
@@ -129,11 +130,16 @@ computer_pattern = "macbook-.*"
 ssh_key = "/etc/ssh-agent-proxy-key"
 ssh_user = "evan"
 agent_witness_socket = "/run/agent-witness/agent.sock"
+
+[notification]
+command = ["/usr/local/bin/agent-auth-notify"]
+timeout = 3
 ```
 
-Every setting is optional. The values above are the defaults. Set
+Every setting is optional. The routing values above are the defaults, while
+notifications are disabled when `notification.command` is omitted. Set
 `AGENT_AUTH_CONFIG` to load another path. The service also supports environment
-overrides, which take precedence over the TOML file:
+overrides for routing, which take precedence over the TOML file:
 
 - `AGENT_AUTH_SSH_KEY`: relay key path; defaults to
   `/etc/ssh-agent-proxy-key`.
@@ -142,6 +148,24 @@ overrides, which take precedence over the TOML file:
   MacBook peers; defaults to `macbook-.*`.
 - `AGENT_AUTH_AGENT_WITNESS_SOCKET`: fallback Agent Witness socket; defaults to
   `/run/agent-witness/agent.sock`.
+
+For each command's first signing request, the service runs the configured
+executable and writes a versioned JSON object to its standard input:
+
+```json
+{
+  "version": 1,
+  "reason": "Push the agent-auth release",
+  "command": ["git", "push"],
+  "group_id": "9abdc3d5-3f40-4c29-a790-e6bdb49d784c",
+  "route": "agent-witness",
+  "hostname": "server"
+}
+```
+
+The command's standard output is discarded so it cannot interfere with the
+SSH-agent protocol. Its standard error is written to the service journal. A
+failure or timeout is logged without interrupting the signing request.
 
 ## Development and releases
 
