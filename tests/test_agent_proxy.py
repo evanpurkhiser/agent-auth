@@ -432,7 +432,7 @@ class RouteTests(unittest.TestCase):
             subprocess.CompletedProcess([], 0, stdout=b"ready"),
         )
 
-        with mock.patch.object(routing.subprocess, "run", side_effect=results):
+        with mock.patch.object(routing.subprocess, "run", side_effect=results) as run:
             backend = routing.find_ready_macbook()
 
         self.assertEqual(
@@ -441,8 +441,11 @@ class RouteTests(unittest.TestCase):
                 "macbook-home", "100.64.0.1", config.RoutingConfig()
             ),
         )
+        probe = run.call_args_list[1]
+        self.assertIn("ConnectTimeout=1", probe.args[0])
+        self.assertEqual(probe.kwargs["timeout"], 2)
 
-    def test_requested_macbook_filters_candidates_by_hostname(self) -> None:
+    def test_requested_macbook_gets_a_longer_readiness_probe(self) -> None:
         status = json.dumps(
             {
                 "Peer": {
@@ -475,7 +478,10 @@ class RouteTests(unittest.TestCase):
                 "macbook-home", "100.64.0.1", config.RoutingConfig()
             ),
         )
-        self.assertEqual(run.call_args_list[1].args[0][-1], "100.64.0.1")
+        probe = run.call_args_list[1]
+        self.assertEqual(probe.args[0][-1], "100.64.0.1")
+        self.assertIn("ConnectTimeout=10", probe.args[0])
+        self.assertEqual(probe.kwargs["timeout"], 11)
 
     def test_configured_computer_pattern_filters_tailnet_peers(self) -> None:
         status = json.dumps(

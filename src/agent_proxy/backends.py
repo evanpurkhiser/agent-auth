@@ -109,20 +109,20 @@ class SshAgentBackend:
     address: str
     config: RoutingConfig
 
-    def is_ready(self) -> bool:
+    def is_ready(self, *, connect_timeout: int = 1) -> bool:
         try:
             probe = subprocess.run(
                 [
                     "ssh",
                     *ssh_options(self.config),
-                    *opt(ConnectTimeout=1),
+                    *opt(ConnectTimeout=connect_timeout),
                     *opt(ConnectionAttempts=1),
                     self.address,
                 ],
                 input=STATUS_REQUEST,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
-                timeout=2,
+                timeout=connect_timeout + 1,
             )
         except (OSError, subprocess.SubprocessError):
             return False

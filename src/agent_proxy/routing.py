@@ -88,9 +88,11 @@ def find_ready_macbook(
     if hostname is not None:
         candidates = [route for route in routes if route.hostname == hostname]
 
+    # An explicit route can wait for a slow link without delaying automatic fallback.
+    connect_timeout = 10 if hostname is not None else 1
     for route in candidates:
         backend = SshAgentBackend(route.hostname, route.address, config)
-        if backend.is_ready():
+        if backend.is_ready(connect_timeout=connect_timeout):
             return backend
 
     return None
